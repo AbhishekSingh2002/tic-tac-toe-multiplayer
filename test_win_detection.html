@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Win Detection Test</title>
+    <style>
+        .test-result { margin: 10px 0; padding: 10px; border-radius: 5px; }
+        .pass { background-color: #d4edda; color: #155724; }
+        .fail { background-color: #f8d7da; color: #721c24; }
+        .test-board { display: grid; grid-template-columns: repeat(3, 50px); gap: 5px; margin: 10px 0; }
+        .test-cell { width: 50px; height: 50px; border: 1px solid #ccc; display: flex; align-items: center; justify-content: center; font-size: 20px; }
+        .winning { background-color: #ffeb3b; }
+    </style>
+</head>
+<body>
+    <h1>Tic-Tac-Toe Win Detection Test</h1>
+    <div id="test-results"></div>
+
+    <script>
+        // Test the win detection logic from our game
+        function checkWinner(board) {
+            const winPatterns = [
+                [0, 1, 2], [3, 4, 5], [6, 7, 8], // rows
+                [0, 3, 6], [1, 4, 7], [2, 5, 8], // columns
+                [0, 4, 8], [2, 4, 6] // diagonals
+            ];
+            
+            for (const pattern of winPatterns) {
+                const [a, b, c] = pattern;
+                if (board[a] && board[a] === board[b] && board[a] === board[c]) {
+                    return board[a]; // Return 'X' or 'O'
+                }
+            }
+            
+            // Check for draw
+            if (board.every(cell => cell !== "")) {
+                return 'draw';
+            }
+            
+            return null;
+        }
+
+        function getWinningLine(board) {
+            const winPatterns = [
+                [0, 1, 2], [3, 4, 5], [6, 7, 8], // rows
+                [0, 3, 6], [1, 4, 7], [2, 5, 8], // columns
+                [0, 4, 8], [2, 4, 6] // diagonals
+            ];
+            
+            for (const pattern of winPatterns) {
+                const [a, b, c] = pattern;
+                if (board[a] && board[a] === board[b] && board[a] === board[c]) {
+                    return pattern;
+                }
+            }
+            
+            return [];
+        }
+
+        function renderBoard(board, winningLine = []) {
+            const boardDiv = document.createElement('div');
+            boardDiv.className = 'test-board';
+            
+            board.forEach((cell, index) => {
+                const cellDiv = document.createElement('div');
+                cellDiv.className = 'test-cell';
+                cellDiv.textContent = cell;
+                if (winningLine.includes(index)) {
+                    cellDiv.classList.add('winning');
+                }
+                boardDiv.appendChild(cellDiv);
+            });
+            
+            return boardDiv;
+        }
+
+        function runTest(name, board, expectedWinner) {
+            const winner = checkWinner(board);
+            const winningLine = winner ? getWinningLine(board) : [];
+            const passed = winner === expectedWinner;
+            
+            const resultDiv = document.createElement('div');
+            resultDiv.className = `test-result ${passed ? 'pass' : 'fail'}`;
+            
+            resultDiv.innerHTML = `
+                <strong>${name}:</strong> ${passed ? 'PASS' : 'FAIL'}<br>
+                Expected: ${expectedWinner || 'null'}, Got: ${winner || 'null'}<br>
+                Winning line: [${winningLine.join(', ')}]
+            `;
+            
+            resultDiv.appendChild(renderBoard(board, winningLine));
+            
+            return resultDiv;
+        }
+
+        // Run tests
+        const resultsDiv = document.getElementById('test-results');
+        
+        // Test cases
+        const testCases = [
+            {
+                name: "Row 1 Win (X)",
+                board: ["X", "X", "X", "", "", "", "", "", ""],
+                expected: "X"
+            },
+            {
+                name: "Row 2 Win (O)",
+                board: ["", "", "", "O", "O", "O", "", "", ""],
+                expected: "O"
+            },
+            {
+                name: "Column 1 Win (X)",
+                board: ["X", "", "", "X", "", "", "X", "", ""],
+                expected: "X"
+            },
+            {
+                name: "Diagonal Win (O)",
+                board: ["O", "", "", "", "O", "", "", "", "O"],
+                expected: "O"
+            },
+            {
+                name: "Anti-Diagonal Win (X)",
+                board: ["", "", "X", "", "X", "", "X", "", ""],
+                expected: "X"
+            },
+            {
+                name: "Draw Game",
+                board: ["X", "O", "X", "X", "O", "O", "O", "X", "X"],
+                expected: "draw"
+            },
+            {
+                name: "No Winner Yet",
+                board: ["X", "O", "X", "", "O", "", "O", "X", "X"],
+                expected: null
+            }
+        ];
+
+        testCases.forEach(test => {
+            resultsDiv.appendChild(runTest(test.name, test.board, test.expected));
+        });
+    </script>
+</body>
+</html>

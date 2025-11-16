@@ -1,0 +1,26 @@
+name: tic-tac-toe-server
+data_dir: "/nakama/data"
+
+logger:
+  stdout: true
+  level: "info"
+
+console:
+  port: 7351
+  username: "admin"
+  password: "password"
+
+socket:
+  server_key: "defaultkey"
+  port: 7350
+
+session:
+  encryption_key: "defaultencryptionkey"
+  token_expiry_sec: 7200
+  refresh_encryption_key: "defaultrefreshencryptionkey"
+  refresh_token_expiry_sec: 86400
+
+runtime:
+  environment: "lua"
+  path: "/nakama/data/modules"
+  http_key: "defaulthttpkey"

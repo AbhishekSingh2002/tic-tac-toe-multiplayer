@@ -1,0 +1,72 @@
+-- server/nakama/modules/init.lua
+local nk = require("nakama")
+
+nk.logger_info("=== Starting Tic-Tac-Toe initialization ===")
+
+-- Log the current working directory and module path
+nk.logger_info("Current working directory: " .. nk.json_encode(nk.get_working_directory()))
+nk.logger_info("Module path: " .. nk.json_encode(package.path))
+
+-- Load the tic_tac_toe module with detailed error handling
+local tic_tac_toe
+local ok, err = pcall(function()
+    nk.logger_info("Attempting to load module: game_logic.tic_tac_toe")
+    tic_tac_toe = require("game_logic.tic_tac_toe")
+    nk.logger_info("Module loaded successfully. Type: " .. type(tic_tac_toe))
+    if type(tic_tac_toe) == "table" then
+        nk.logger_info("Module contains keys: " .. nk.json_encode({table.unpack(tic_tac_toe)}))
+    end
+end)
+
+if not ok or type(tic_tac_toe) ~= "table" then
+    nk.logger_error("Failed to load game_logic.tic_tac_toe: " .. tostring(err))
+    nk.logger_error("Module type: " .. type(tic_tac_toe))
+    return
+end
+
+-- Define required functions
+local required_functions = {
+    "match_init",
+    "match_join_attempt",
+    "match_join",
+    "match_leave",
+    "match_loop",
+    "match_terminate",
+    "match_signal"
+}
+
+-- Verify all required functions exist
+local all_functions_exist = true
+for _, func_name in ipairs(required_functions) do
+    if type(tic_tac_toe[func_name]) ~= "function" then
+        nk.logger_error("Missing or invalid function: " .. func_name)
+        all_functions_exist = false
+    end
+end
+
+if not all_functions_exist then
+    nk.logger_error("Not all required functions are available in the module")
+    return
+end
+
+-- Register the match handler
+nk.logger_info("Registering Tic-Tac-Toe match handler...")
+
+local success, register_err = pcall(function()
+    nk.register_match("tic_tac_toe", {
+        match_init = tic_tac_toe.match_init,
+        match_join_attempt = tic_tac_toe.match_join_attempt,
+        match_join = tic_tac_toe.match_join,
+        match_leave = tic_tac_toe.match_leave,
+        match_loop = tic_tac_toe.match_loop,
+        match_terminate = tic_tac_toe.match_terminate,
+        match_signal = tic_tac_toe.match_signal
+    })
+end)
+
+if not success then
+    nk.logger_error("Failed to register match handler: " .. tostring(register_err))
+    return
+end
+
+nk.logger_info("=== Tic-Tac-Toe match handler registered successfully ===")

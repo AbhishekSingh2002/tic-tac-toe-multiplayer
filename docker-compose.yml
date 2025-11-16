@@ -1,0 +1,94 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:14-alpine
+    container_name: ttt_postgres
+    environment:
+      POSTGRES_DB: nakama
+      POSTGRES_USER: nakama
+      POSTGRES_PASSWORD: nakama_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./server/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nakama -d nakama"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - ttt_network
+
+  nakama:
+    build:
+      context: .
+      dockerfile: Dockerfile.nakama
+    container_name: ttt_nakama
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint:
+      - "/bin/sh"
+      - "-ecx"
+      - |
+        # Wait for PostgreSQL to be ready (60s max)
+        echo "Waiting for PostgreSQL to be ready (60s max)..."
+        if ! timeout 60s sh -c 'until PGPASSWORD=nakama_password psql -h postgres -U nakama -d postgres -c "SELECT 1" >/dev/null 2>&1; do
+          echo "PostgreSQL not ready yet. Retrying in 2 seconds..."
+          sleep 2
+        done'; then
+          echo "Error: Could not connect to PostgreSQL database after 60s"
+          exit 1
+        fi
+        
+        echo "Running database migrations..."
+        if ! /nakama/nakama migrate up --database.address "postgres://nakama:nakama_password@postgres:5432/nakama?sslmode=disable"; then
+          echo "Error: Database migration failed"
+          exit 1
+        fi
+        
+        echo "Starting Nakama server..."
+        exec /nakama/nakama \
+          --name nakama1 \
+          --database.address "postgres://nakama:nakama_password@postgres:5432/nakama?sslmode=disable" \
+          --logger.level DEBUG \
+          --session.token_expiry_sec 7200 \
+          --metrics.prometheus_port 9100
+    environment:
+      PGPASSWORD: nakama_password
+      NAKAMA_DATABASE_URL: "postgres://nakama:nakama_password@postgres:5432/nakama?sslmode=disable"
+      NAKAMA_DATABASE_USER: "nakama"
+      NAKAMA_DATABASE_PASSWORD: "nakama_password"
+      NAKAMA_DATABASE_NAME: "nakama"
+    ports:
+      - "7350:7350"  # HTTP/WebSocket
+      - "7351:7351"  # Console
+      - "7349:7349"  # gRPC
+    volumes:
+      - ./server/nakama/modules:/nakama/data/modules
+    networks:
+      - ttt_network
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: ttt_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - ttt_network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  ttt_network:
+    driver: bridge

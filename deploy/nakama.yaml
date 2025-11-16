@@ -1,0 +1,144 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nakama-config
+data:
+  nakama.yml: |
+    name: tictactoe-prod
+    data_dir: "/nakama/data/"
+    logger:
+      stdout: true
+      level: "info"
+    console:
+      port: 7351
+      username: "admin"
+      password: "changeme"
+      max_message_size_bytes: 4096
+    socket:
+      server_key: "defaultkey"
+      port: 7350
+      max_message_size_bytes: 4096
+      read_timeout_ms: 10000
+      write_timeout_ms: 10000
+      idle_timeout_ms: 60000
+    session:
+      encryption_key: "defaultencryptionkey"
+      token_expiry_sec: 7200
+    database:
+      addresses:
+        - "postgres:5432"
+      conn_max_lifetime_ms: 0
+      max_open_conns: 100
+      max_idle_conns: 10
+    runtime:
+      environment: "lua"
+      path: "/nakama/data/modules"
+      http_key: "defaulthttpkey"
+    matchmaker:
+      max_tickets: 3
+      interval_sec: 2
+      max_intervals: 30
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nakama-secret
+type: Opaque
+stringData:
+  NAKAMA_DATABASE_NAME: nakama
+  NAKAMA_DATABASE_USER: nakama
+  NAKAMA_DATABASE_PASSWORD: changeme_in_production
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nakama
+  labels:
+    app: nakama
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nakama
+  template:
+    metadata:
+      labels:
+        app: nakama
+    spec:
+      containers:
+        - name: nakama
+          image: heroiclabs/nakama:3.17.1
+          ports:
+            - name: http
+              containerPort: 7350
+              protocol: TCP
+            - name: grpc
+              containerPort: 7349
+              protocol: TCP
+            - name: console
+              containerPort: 7351
+              protocol: TCP
+          env:
+            - name: NAKAMA_DATABASE_SERVER_HOST
+              value: "postgres"
+            - name: NAKAMA_DATABASE_SERVER_PORT
+              value: "5432"
+            - name: NAKAMA_DATABASE_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: nakama-secret
+                  key: NAKAMA_DATABASE_NAME
+            - name: NAKAMA_DATABASE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: nakama-secret
+                  key: NAKAMA_DATABASE_USER
+            - name: NAKAMA_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: nakama-secret
+                  key: NAKAMA_DATABASE_PASSWORD
+          volumeMounts:
+            - name: config
+              mountPath: /nakama/data/nakama.yml
+              subPath: nakama.yml
+            - name: modules
+              mountPath: /nakama/data/modules
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 7350
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 7350
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: config
+          configMap:
+            name: nakama-config
+        - name: modules
+          configMap:
+            name: nakama-modules
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nakama-modules
+data:
+  tic_tac_toe.lua: |
+    -- Your Tic-Tac-Toe game logic will go here
+  matchmaker.lua: |
+    -- Your matchmaking logic will go here
+  tic_tac_toe_match.lua: |
+    -- Your match handler logic will go here

@@ -1,0 +1,60 @@
+-- test_tic_tac_toe_match.lua
+local nk = require("nakama")
+local match_handler = require("tic_tac_toe_match")
+
+-- Mock Nakama context and dispatcher
+local mock_context = {
+    user_id = "test_user"
+}
+
+local mock_dispatcher = {
+    broadcast_message = function(opcode, data, presences, sender)
+        print(string.format("Broadcast (op %d): %s", opcode, data))
+    end,
+    match_label_update = function(label)
+        print("Match label updated:", label)
+    end
+}
+
+-- Test match initialization
+print("=== Testing Match Initialization ===")
+local state, tick_rate, label = match_handler.match_init(mock_context, {
+    match_id = "test_match_123",
+    player_x_id = "player1",
+    player_o_id = "player2"
+})
+
+print("Initial state:")
+print("Match ID:", state.match_id)
+print("Player X:", state.player_x_id)
+print("Player O:", state.player_o_id)
+print("Tick rate:", tick_rate)
+print("Label:", label)
+
+-- Test player join
+print("\n=== Testing Player Join ===")
+local presence1 = {
+    session_id = "sess1",
+    user_id = "player1",
+    username = "Player1"
+}
+
+state = match_handler.match_join(mock_context, mock_dispatcher, 1, state, {presence1})
+
+print("After player1 joined:")
+print("Players in match:", #state.presences)
+
+-- Test make move
+print("\n=== Testing Move Handling ===")
+local move_data = {
+    op_code = 1,
+    data = nk.json_encode({
+        type = "move",
+        cell_index = 4
+    })
+}
+
+state = match_handler.match_loop(mock_context, mock_dispatcher, 2, state, {move_data})
+
+print("After move:")
+print("Board state updated")

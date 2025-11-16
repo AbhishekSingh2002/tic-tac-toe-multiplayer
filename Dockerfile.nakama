@@ -1,0 +1,28 @@
+# Use Nakama base image
+FROM heroiclabs/nakama:3.17.1
+
+# Install postgresql-client for health checks
+USER root
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends postgresql-client && \
+    rm -rf /var/lib/apt/lists/*
+USER 1000
+
+# Copy custom runtime modules
+COPY server/nakama/modules /nakama/data/modules
+
+# Expose ports
+EXPOSE 7349 7350 7351
+
+# Create a custom entrypoint script
+USER root
+RUN echo '#!/bin/sh\n\
+until PGPASSWORD=nakama_password psql -h postgres -U nakama -d postgres -c "SELECT 1" >/dev/null 2>&1; do\n\
+  echo "Waiting for PostgreSQL..."\n\
+  sleep 2\ndone\n\
+exec /nakama/nakama --database.address postgres:5432\n' > /entrypoint.sh && \
+    chmod +x /entrypoint.sh
+USER 1000
+
+# Use the custom entrypoint
+ENTRYPOINT ["/entrypoint.sh"]

@@ -1,0 +1,20 @@
+{
+  "NakamaHost": "localhost:7350",
+  "ServerKey": "defaultkey",
+  "ApiTimeoutSeconds": 30,
+  "MaxRetryAttempts": 3,
+  "RetryDelayMs": 1000,
+  "MatchWaitTimeSeconds": 5,
+  "Players": [
+    {
+      "email": "player1@test.com",
+      "password": "password123",
+      "username": "Player1"
+    },
+    {
+      "email": "player2@test.com",
+      "password": "password123",
+      "username": "Player2"
+    }
+  ]
+}

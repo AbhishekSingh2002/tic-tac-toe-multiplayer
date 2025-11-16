@@ -1,0 +1,792 @@
+-- Tic-Tac-Toe Game Logic Module (Enhanced)
+
+local nk = require("nakama")
+local errors = require("error_handling")
+
+-- Custom table.find function to replace tablex.find
+local function table_find(tbl, item)
+    if not tbl then return nil end
+    for i, v in ipairs(tbl) do
+        if v == item then
+            return i
+        end
+    end
+    return nil
+end
+
+-- Constants
+local BOARD_SIZE = 9
+local EMPTY_CELL = ""
+local PLAYER_X = "X"
+local PLAYER_O = "O"
+
+-- Game configuration
+local CONFIG = {
+    MAX_MOVES_PER_MINUTE = 30,
+    TURN_TIMEOUT_SECONDS = 30,
+    RATE_LIMIT_WINDOW = 60, -- 60 seconds
+    MAX_SPECTATORS = 10,
+    MIN_USERNAME_LENGTH = 3,
+    MAX_USERNAME_LENGTH = 20,
+    MIN_PASSWORD_LENGTH = 8,
+    MAX_PASSWORD_LENGTH = 72
+}
+
+-- Win conditions (indices)
+local WIN_PATTERNS = {
+    {0, 1, 2}, {3, 4, 5}, {6, 7, 8}, -- rows
+    {0, 3, 6}, {1, 4, 7}, {2, 5, 8}, -- columns
+    {0, 4, 8}, {2, 4, 6}             -- diagonals
+}
+
+-- Check if there's a winner
+local function check_winner(board)
+    for _, pattern in ipairs(WIN_PATTERNS) do
+        local a, b, c = pattern[1] + 1, pattern[2] + 1, pattern[3] + 1 -- Lua tables are 1-indexed
+        if board[a] ~= EMPTY_CELL and 
+           board[a] == board[b] and 
+           board[b] == board[c] then
+            return board[a]
+        end
+    end
+    return nil
+end
+
+-- Check if board is full (draw)
+local function is_draw(board)
+    for i = 1, BOARD_SIZE do
+        if board[i] == EMPTY_CELL then
+            return false
+        end
+    end
+    return true
+end
+
+-- Check if player is rate limited
+local function is_rate_limited(player_id)
+    local now = os.time()
+    local key = string.format("rate_limit:%s", player_id)
+    
+    -- Get existing rate limit data
+    local read_req = { { collection = "rate_limits", key = key, user_id = nil } }
+    local objects = nk.storage_read(read_req)
+    
+    local rate_data = {}
+    if #objects > 0 then
+        rate_data = nk.json_decode(objects[1].value)
+    end
+    
+    -- Initialize or update rate data
+    rate_data.timestamps = rate_data.timestamps or {}
+    rate_data.count = rate_data.count or 0
+    
+    -- Remove timestamps older than the rate limit window
+    local valid_timestamps = {}
+    local current_count = 0
+    for _, ts in ipairs(rate_data.timestamps) do
+        if now - ts <= CONFIG.RATE_LIMIT_WINDOW then
+            table.insert(valid_timestamps, ts)
+            current_count = current_count + 1
+        end
+    end
+    
+    -- Check if rate limit exceeded
+    if current_count >= CONFIG.MAX_MOVES_PER_MINUTE then
+        return true, CONFIG.RATE_LIMIT_WINDOW - (now - valid_timestamps[1])
+    end
+    
+    -- Update rate data with new timestamp
+    table.insert(valid_timestamps, now)
+    rate_data.timestamps = valid_timestamps
+    rate_data.count = #valid_timestamps
+    
+    -- Save updated rate data
+    local write_req = {
+        { 
+            collection = "rate_limits",
+            key = key,
+            value = nk.json_encode(rate_data),
+            permission_read = 0,
+            permission_write = 0
+        }
+    }
+    nk.storage_write(write_req)
+    
+    return false, 0
+end
+
+-- Initialize new game state
+local function create_game_state(player_x_id, player_o_id)
+    local board = {}
+    for i = 1, BOARD_SIZE do
+        board[i] = EMPTY_CELL
+    end
+    
+    return {
+        board = board,
+        player_x_id = player_x_id,
+        player_o_id = player_o_id,
+        next_turn = PLAYER_X,
+        status = "active",
+        winner_id = nil,
+        move_history = {},
+        created_at = os.time(),
+        last_updated_at = os.time(),
+        rematch_requested_by = {},
+        spectators = {}
+    }
+end
+
+-- Validate move
+local function validate_move(state, player_id, cell_index)
+    -- Check if game is active
+    errors.validate_game_active(state)
+    
+    -- Validate player is in the game
+    errors.validate_player_in_game(state, player_id)
+    
+    -- Validate it's player's turn
+    local current_player = (state.next_turn == PLAYER_X) and state.player_x_id or state.player_o_id
+    if player_id ~= current_player then
+        errors.throw_error(
+            errors.ERROR_CODES.NOT_YOUR_TURN,
+            "It's not your turn"
+        )
+    end
+    
+    -- Check rate limiting
+    local is_limited, time_remaining = is_rate_limited(player_id)
+    if is_limited then
+        errors.throw_error(
+            errors.ERROR_CODES.RATE_LIMIT,
+            "Rate limit exceeded. Please wait " .. time_remaining .. " seconds.",
+            { retry_after = time_remaining }
+        )
+    end
+    
+    -- Check cell index bounds
+    if type(cell_index) ~= "number" or cell_index < 1 or cell_index > BOARD_SIZE then
+        errors.throw_error(
+            errors.ERROR_CODES.INVALID_INPUT,
+            string.format("Cell index must be between 1 and %d", BOARD_SIZE),
+            { min = 1, max = BOARD_SIZE, provided = cell_index }
+        )
+    end
+    
+    -- Check if cell is empty
+    if state.board[cell_index] ~= EMPTY_CELL then
+        errors.throw_error(
+            errors.ERROR_CODES.CELL_OCCUPIED,
+            "Cell is already occupied",
+            { cell = cell_index }
+        )
+    end
+    
+    -- Determine player symbol
+    local player_symbol = (player_id == state.player_x_id) and PLAYER_X or PLAYER_O
+    
+    return true, player_symbol
+end
+
+-- Apply move and check game end
+local function apply_move(state, player_symbol, cell_index)
+    -- Update board (convert to 1-based index for Lua tables)
+    state.board[cell_index] = player_symbol
+    
+    -- Record move
+    table.insert(state.move_history, {
+        player = player_symbol,
+        cell = cell_index,
+        timestamp = os.time()
+    })
+    
+    -- Check for winner
+    local winner = check_winner(state.board)
+    if winner then
+        state.status = "finished"
+        if winner == PLAYER_X then
+            state.winner_id = state.player_x_id
+        else
+            state.winner_id = state.player_o_id
+        end
+        return state, "win", state.winner_id
+    end
+    
+    -- Check for draw
+    if is_draw(state.board) then
+        state.status = "finished"
+        return state, "draw", nil
+    end
+    
+    -- Switch turns
+    state.next_turn = (player_symbol == PLAYER_X) and PLAYER_O or PLAYER_X
+    state.last_updated_at = os.time()
+    
+    return state, "continue", nil
+end
+
+-- Update player statistics
+local function update_player_stats(player_x_id, player_o_id, winner_id)
+    local players = {player_x_id, player_o_id}
+    
+    for _, player_id in ipairs(players) do
+        local read_ids = {{
+            collection = "player_stats",
+            key = "stats",
+            user_id = player_id
+        }}
+        
+        local objects = nk.storage_read(read_ids)
+        local stats = {}
+        
+        if #objects > 0 then
+            stats = nk.json_decode(objects[1].value)
+        else
+            stats = {wins = 0, losses = 0, draws = 0, rating = 1500, current_streak = 0, best_streak = 0}
+        end
+        
+        -- Update stats
+        if winner_id == nil then
+            -- Draw
+            stats.draws = (stats.draws or 0) + 1
+            stats.current_streak = 0
+        elseif winner_id == player_id then
+            -- Win
+            stats.wins = (stats.wins or 0) + 1
+            stats.rating = (stats.rating or 1500) + 20
+            stats.current_streak = (stats.current_streak or 0) + 1
+            if stats.current_streak > (stats.best_streak or 0) then
+                stats.best_streak = stats.current_streak
+            end
+        else
+            -- Loss
+            stats.losses = (stats.losses or 0) + 1
+            stats.rating = math.max(0, (stats.rating or 1500) - 15)
+            stats.current_streak = 0
+        end
+        
+        -- Calculate win rate
+        local total_games = (stats.wins or 0) + (stats.losses or 0) + (stats.draws or 0)
+        if total_games > 0 then
+            stats.win_rate = math.floor(((stats.wins or 0) / total_games) * 100)
+        end
+        
+        -- Write updated stats
+        local write = {{
+            collection = "player_stats",
+            key = "stats",
+            user_id = player_id,
+            value = nk.json_encode(stats),
+            permission_read = 1,
+            permission_write = 0
+        }}
+        nk.storage_write(write)
+        
+        -- Update leaderboard
+        nk.leaderboard_record_write("global_leaderboard", player_id, nil, stats.rating)
+    end
+end
+
+-- RPC: Make a move
+local function rpc_make_move(context, payload)
+    local json = nk.json_decode(payload)
+    
+    -- Input validation
+    errors.validate_fields(json, {"match_id", "cell_index"})
+    errors.validate_number_range(json.cell_index, 1, BOARD_SIZE, "cell_index")
+    
+    local match_id = json.match_id
+    local cell_index = json.cell_index
+    local player_id = context.user_id
+    
+    -- Get match state from storage
+    local object_ids = {{
+        collection = "matches",
+        key = match_id,
+        user_id = nil
+    }}
+    
+    local objects = nk.storage_read(object_ids)
+    if #objects == 0 then
+        errors.throw_error(errors.ERROR_CODES.GAME_NOT_FOUND, "Match not found")
+    end
+    
+    local state = nk.json_decode(objects[1].value)
+    
+    -- Validate and process move
+    local valid, player_symbol = validate_move(state, player_id, cell_index)
+    if not valid then
+        return nk.json_encode({ success = false, error = player_symbol })
+    end
+    
+    -- Apply move
+    local new_state, result, winner_id = apply_move(state, player_symbol, cell_index)
+    
+    -- Save updated state
+    local write = {}
+    table.insert(write, {
+        collection = "matches",
+        key = match_id,
+        value = nk.json_encode(new_state),
+        permission_read = 1,
+        permission_write = 0
+    })
+    
+    -- If game is over, update stats
+    if result == "win" or result == "draw" then
+        update_player_stats(
+            new_state.player_x_id,
+            new_state.player_o_id,
+            new_state.winner_id
+        )
+    end
+    
+    nk.storage_write(write)
+    
+    -- Notify players
+    local notification = {
+        match_id = match_id,
+        player_id = player_id,
+        cell_index = cell_index,
+        result = result,
+        winner_id = winner_id,
+        next_turn = new_state.next_turn,
+        board = new_state.board
+    }
+    
+    -- Broadcast to all players and spectators
+    local presences = {}
+    
+    -- Add players
+    if new_state.player_x_id then
+        table.insert(presences, { user_id = new_state.player_x_id })
+    end
+    if new_state.player_o_id then
+        table.insert(presences, { user_id = new_state.player_o_id })
+    end
+    
+    -- Add spectators
+    for _, spec_id in ipairs(new_state.spectators or {}) do
+        table.insert(presences, { user_id = spec_id })
+    end
+    
+    -- Send notification
+    nk.notification_send(
+        "game_move",
+        "Game update",
+        nk.json_encode(notification),
+        presences,
+        nil,
+        false
+    )
+    
+    return nk.json_encode({
+        success = true,
+        result = result,
+        winner_id = winner_id,
+        next_turn = new_state.next_turn,
+        board = new_state.board
+    })
+end
+
+-- RPC: Request rematch
+local function rpc_request_rematch(context, payload)
+    local json = nk.json_decode(payload)
+    errors.validate_fields(json, {"match_id"})
+    
+    local match_id = json.match_id
+    local player_id = context.user_id
+    
+    -- Get match state
+    local objects = nk.storage_read({{
+        collection = "matches",
+        key = match_id,
+        user_id = nil
+    }})
+    
+    if #objects == 0 then
+        errors.throw_error(errors.ERROR_CODES.GAME_NOT_FOUND, "Match not found")
+    end
+    
+    local state = nk.json_decode(objects[1].value)
+    
+    -- Check if game is finished
+    if state.status ~= "finished" then
+        errors.throw_error(
+            errors.ERROR_CODES.INVALID_STATE,
+            "Cannot request rematch for an active game"
+        )
+    end
+    
+    -- Check if player was in the game
+    if player_id ~= state.player_x_id and player_id ~= state.player_o_id then
+        errors.throw_error(
+            errors.ERROR_CODES.PERMISSION_DENIED,
+            "Only game participants can request a rematch"
+        )
+    end
+    
+    -- Initialize rematch requests if needed
+    state.rematch_requested_by = state.rematch_requested_by or {}
+    
+    -- Check if already requested
+    for _, id in ipairs(state.rematch_requested_by) do
+        if id == player_id then
+            return nk.json_encode({
+                success = true,
+                status = "already_requested",
+                rematch_requested = true
+            })
+        end
+    end
+    
+    -- Add to rematch requests
+    table.insert(state.rematch_requested_by, player_id)
+    
+    -- Check if both players requested rematch
+    local other_player_id = (player_id == state.player_x_id) 
+        and state.player_o_id 
+        or state.player_x_id
+    
+    local other_player_requested = false
+    for _, id in ipairs(state.rematch_requested_by) do
+        if id == other_player_id then
+            other_player_requested = true
+            break
+        end
+    end
+    
+    -- If both requested, create new game
+    local new_match_id = nil
+    if other_player_requested then
+        -- Create new game with same players but reversed colors
+        new_match_id = nk.uuid_v4()
+        local new_state = create_game_state(
+            state.player_o_id,  -- Swap players
+            state.player_x_id
+        )
+        
+        -- Save new game
+        nk.storage_write({
+            {
+                collection = "matches",
+                key = new_match_id,
+                value = nk.json_encode(new_state),
+                permission_read = 1,
+                permission_write = 0
+            }
+        })
+        
+        -- Notify players
+        local notification = {
+            match_id = new_match_id,
+            player_x_id = new_state.player_x_id,
+            player_o_id = new_state.player_o_id,
+            next_turn = new_state.next_turn
+        }
+        
+        nk.notification_send(
+            "rematch_accepted",
+            "Rematch started",
+            nk.json_encode(notification),
+            {
+                { user_id = new_state.player_x_id },
+                { user_id = new_state.player_o_id }
+            },
+            nil,
+            false
+        )
+    end
+    
+    -- Update original match state
+    nk.storage_write({
+        {
+            collection = "matches",
+            key = match_id,
+            value = nk.json_encode(state),
+            permission_read = 1,
+            permission_write = 0
+        }
+    })
+    
+    return nk.json_encode({
+        success = true,
+        rematch_requested = true,
+        rematch_accepted = new_match_id ~= nil,
+        new_match_id = new_match_id
+    })
+end
+
+-- RPC: Join as spectator
+local function rpc_join_as_spectator(context, payload)
+    local json = nk.json_decode(payload)
+    errors.validate_fields(json, {"match_id"})
+    
+    local match_id = json.match_id
+    local player_id = context.user_id
+    
+    -- Get match state
+    local objects = nk.storage_read({{
+        collection = "matches",
+        key = match_id,
+        user_id = nil
+    }})
+    
+    if #objects == 0 then
+        errors.throw_error(errors.ERROR_CODES.GAME_NOT_FOUND, "Match not found")
+    end
+    
+    local state = nk.json_decode(objects[1].value)
+    
+    -- Check if player is already in the game
+    if player_id == state.player_x_id or player_id == state.player_o_id then
+        errors.throw_error(
+            errors.ERROR_CODES.INVALID_STATE,
+            "Players cannot spectate their own game"
+        )
+    end
+    
+    -- Initialize spectators list if needed
+    state.spectators = state.spectators or {}
+    
+    -- Check if already spectating
+    for _, spec_id in ipairs(state.spectators) do
+        if spec_id == player_id then
+            return nk.json_encode({
+                success = true,
+                already_spectating = true
+            })
+        end
+    end
+    
+    -- Check spectator limit
+    if #state.spectators >= CONFIG.MAX_SPECTATORS then
+        errors.throw_error(
+            errors.ERROR_CODES.MATCH_FULL,
+            "Spectator limit reached"
+        )
+    end
+    
+    -- Add to spectators
+    table.insert(state.spectators, player_id)
+    
+    -- Save updated state
+    nk.storage_write({
+        {
+            collection = "matches",
+            key = match_id,
+            value = nk.json_encode(state),
+            permission_read = 1,
+            permission_write = 0
+        }
+    })
+    
+    -- Send current game state to the new spectator
+    local game_state = {
+        match_id = match_id,
+        player_x_id = state.player_x_id,
+        player_o_id = state.player_o_id,
+        next_turn = state.next_turn,
+        board = state.board,
+        status = state.status,
+        winner_id = state.winner_id,
+        is_spectator = true
+    }
+    
+    nk.notification_send(
+        "spectator_joined",
+        "Spectator joined",
+        nk.json_encode(game_state),
+        { { user_id = player_id } },
+        nil,
+        false
+    )
+    
+    -- Notify players (optional)
+    local player_ids = {}
+    if state.player_x_id then table.insert(player_ids, { user_id = state.player_x_id }) end
+    if state.player_o_id then table.insert(player_ids, { user_id = state.player_o_id }) end
+    
+    nk.notification_send(
+        "player_spectating",
+        "Player is now spectating",
+        nk.json_encode({
+            player_id = player_id,
+            spectator_count = #state.spectators
+        }),
+        player_ids,
+        nil,
+        false
+    )
+    
+    return nk.json_encode({
+        success = true,
+        spectator_count = #state.spectators,
+        game_state = game_state
+    })
+end
+
+-- RPC: Leave spectator mode
+local function rpc_leave_spectator(context, payload)
+    local json = nk.json_decode(payload)
+    errors.validate_fields(json, {"match_id"})
+    
+    local match_id = json.match_id
+    local player_id = context.user_id
+    
+    -- Get match state
+    local objects = nk.storage_read({{
+        collection = "matches",
+        key = match_id,
+        user_id = nil
+    }})
+    
+    if #objects == 0 then
+        errors.throw_error(errors.ERROR_CODES.GAME_NOT_FOUND, "Match not found")
+    end
+    
+    local state = nk.json_decode(objects[1].value)
+    
+    -- Check if actually spectating
+    local spectator_index = nil
+    for i, spec_id in ipairs(state.spectators or {}) do
+        if spec_id == player_id then
+            spectator_index = i
+            break
+        end
+    end
+    
+    if not spectator_index then
+        return nk.json_encode({
+            success = true,
+            was_spectating = false
+        })
+    end
+    
+    -- Remove from spectators
+    table.remove(state.spectators, spectator_index)
+    
+    -- Save updated state
+    nk.storage_write({
+        {
+            collection = "matches",
+            key = match_id,
+            value = nk.json_encode(state),
+            permission_read = 1,
+            permission_write = 0
+        }
+    })
+    
+    -- Notify players
+    local player_ids = {}
+    if state.player_x_id then table.insert(player_ids, { user_id = state.player_x_id }) end
+    if state.player_o_id then table.insert(player_ids, { user_id = state.player_o_id }) end
+    
+    nk.notification_send(
+        "spectator_left",
+        "Spectator left",
+        nk.json_encode({
+            player_id = player_id,
+            spectator_count = #state.spectators
+        }),
+        player_ids,
+        nil,
+        false
+    )
+    
+    return nk.json_encode({
+        success = true,
+        was_spectating = true,
+        spectator_count = #state.spectators
+    })
+end
+
+-- RPC: Get game state
+local function rpc_get_game_state(context, payload)
+    local json = nk.json_decode(payload or "{}")
+    local match_id = json.match_id
+    local player_id = context.user_id
+    
+    if not match_id then
+        errors.throw_error(
+            errors.ERROR_CODES.INVALID_INPUT,
+            "match_id is required"
+        )
+    end
+    
+    -- Get match state
+    local objects = nk.storage_read({{
+        collection = "matches",
+        key = match_id,
+        user_id = nil
+    }})
+    
+    if #objects == 0 then
+        errors.throw_error(errors.ERROR_CODES.GAME_NOT_FOUND, "Match not found")
+    end
+    
+    local state = nk.json_decode(objects[1].value)
+    
+    -- Check if player has access
+    local has_access = (player_id == state.player_x_id) or 
+                      (player_id == state.player_o_id) or
+                      (state.spectators and table_find(state.spectators, player_id))
+    
+    if not has_access then
+        errors.throw_error(
+            errors.ERROR_CODES.PERMISSION_DENIED,
+            "You don't have access to this game"
+        )
+    end
+    
+    -- Prepare response
+    local response = {
+        match_id = match_id,
+        player_x_id = state.player_x_id,
+        player_o_id = state.player_o_id,
+        next_turn = state.next_turn,
+        board = state.board,
+        status = state.status,
+        winner_id = state.winner_id,
+        created_at = state.created_at,
+        last_updated_at = state.last_updated_at,
+        is_spectator = state.spectators and table_find(state.spectators, player_id) ~= nil,
+        spectator_count = state.spectators and #state.spectators or 0
+    }
+    
+    -- Add rematch info if game is over
+    if state.status == "finished" then
+        response.rematch_requested = state.rematch_requested_by or {}
+    end
+    
+    return nk.json_encode(response)
+end
+
+-- Register RPCs
+nk.register_rpc(function(context, payload)
+    return errors.rpc_error_handler(rpc_make_move)(context, payload)
+end, "make_move")
+
+nk.register_rpc(function(context, payload)
+    return errors.rpc_error_handler(rpc_request_rematch)(context, payload)
+end, "request_rematch")
+
+nk.register_rpc(function(context, payload)
+    return errors.rpc_error_handler(rpc_join_as_spectator)(context, payload)
+end, "join_as_spectator")
+
+nk.register_rpc(function(context, payload)
+    return errors.rpc_error_handler(rpc_leave_spectator)(context, payload)
+end, "leave_spectator")
+
+nk.register_rpc(function(context, payload)
+    return errors.rpc_error_handler(rpc_get_game_state)(context, payload)
+end, "get_game_state")
+
+return {
+    create_game_state = create_game_state,
+    validate_move = validate_move,
+    apply_move = apply_move,
+    check_winner = check_winner,
+    is_draw = is_draw
+}
